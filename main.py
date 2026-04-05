@@ -26,11 +26,11 @@ def load_models():
 class ParkingRequest(BaseModel):
     datetime: str
 
+# UPGRADED: Added target_location
 class RecommendationRequest(BaseModel):
-    # We receive the TEXT content, not IDs, because this server 
-    # doesn't have access to the Django Database.
-    target_content: str  # The description of the event user booked
-    candidates: list     # List of all other events [{'id': 1, 'content': '...'}, ...]
+    target_content: str  
+    target_location: str 
+    candidates: list     # [{'id': 1, 'content': '...', 'location': '...'}, ...]
 
 # --- ROUTES ---
 
@@ -68,30 +68,47 @@ def predict_parking(req: ParkingRequest):
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+# UPGRADED: Hybrid Scoring System
 @app.post("/recommend/")
 def get_recommendations(req: RecommendationRequest):
     """
-    Generic Recommendation Engine (Works for Events AND Facilities).
+    Hybrid Recommendation Engine: Blends TF-IDF Text Similarity with Geographic Weighting.
     """
     if not req.candidates:
         return []
 
-    # Prepare Data
+    # 1. Prepare Text Data for TF-IDF
     contents = [req.target_content] + [item['content'] for item in req.candidates]
     
     # Vectorize
     tfidf = TfidfVectorizer(stop_words='english')
     matrix = tfidf.fit_transform(contents)
     
-    # Calculate Similarity with the Target (Index 0)
-    cosine_sim = cosine_similarity(matrix[0:1], matrix[1:])
+    # Calculate Text Similarity with the Target (Index 0)
+    # This gives us an array of base scores from 0.0 to 1.0
+    cosine_sim = cosine_similarity(matrix[0:1], matrix[1:])[0]
     
-    # Get Scores
-    scores = list(enumerate(cosine_sim[0]))
-    scores = sorted(scores, key=lambda x: x[1], reverse=True)
+    # 2. Apply Location Weighting Algorithm
+    LOCATION_WEIGHT = 0.3 # Adjust this to make location more or less important!
+    
+    final_scores = []
+    
+    for idx, candidate in enumerate(req.candidates):
+        base_score = cosine_sim[idx]
+        
+        # Check if the candidate's location contains the user's target city
+        location_boost = 0.0
+        if req.target_location and req.target_location.lower() in candidate.get('location', '').lower():
+            location_boost = LOCATION_WEIGHT
+            
+        # Blend the scores
+        total_score = base_score + location_boost
+        final_scores.append((candidate['id'], total_score))
+    
+    # 3. Sort by the new Hybrid Score
+    final_scores = sorted(final_scores, key=lambda x: x[1], reverse=True)
     
     # Return Top 3 IDs
-    top_indices = [i[0] for i in scores[:3]]
-    recommended_ids = [req.candidates[i]['id'] for i in top_indices]
+    top_indices = [item[0] for item in final_scores[:3]]
     
-    return recommended_ids
+    return top_indices
